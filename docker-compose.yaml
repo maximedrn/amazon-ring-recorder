@@ -1,0 +1,33 @@
+name: amazon-ring-recorder
+
+services:
+  amazon-ring-recorder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: amazon-ring-recorder:latest
+    container_name: amazon-ring-recorder
+    restart: unless-stopped
+    volumes:
+      - ${TOKEN_DIRECTORY:-./data}:/app/data
+      - ${OUTPUT_DIRECTORY:-./data/recordings}:/app/data/recordings
+    env_file:
+      - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+volumes:
+  ring_token_data:
+    driver: local

@@ -1,0 +1,30 @@
+arch: <%= it.arch %>
+
+images:
+  - location: "<%= it.image %>"
+    arch: <%= it.arch %>
+
+cpus: <%= it.cpus %>
+memory: "<%= it.memory %>"
+disk: "<%= it.disk %>"
+
+provision:
+  - mode: system
+    script: |
+      set -eux
+      USER_NAME="$(getent passwd 1000 | cut -d: -f1)"
+      mkdir -p "/home/${USER_NAME}"
+      chown "${USER_NAME}:${USER_NAME}" "/home/${USER_NAME}"
+      echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USER_NAME}"
+      chmod 440 "/etc/sudoers.d/${USER_NAME}"
+      getent group docker || groupadd docker
+      usermod -aG docker "${USER_NAME}" 2>/dev/null || true
+
+  - mode: user
+    script: |
+      set -eux
+      sudo mkdir -p /home/${USER}/.ssh
+      sudo cp "${HOME}/.ssh/authorized_keys" /home/${USER}/.ssh/authorized_keys
+      sudo chown -R ${USER}:${USER} /home/${USER}/.ssh
+      sudo chmod 700 /home/${USER}/.ssh
+      sudo chmod 600 /home/${USER}/.ssh/authorized_keys

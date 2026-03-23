@@ -1,0 +1,27 @@
+# Project related.
+data
+config
+scripts
+
+# OS files.
+.DS_Store
+Thumbs.db
+
+# Node modules and build artifacts.
+node_modules
+dist
+
+# Environment files.
+.env
+.env.*
+!.env.example
+
+# Logs.
+*.log
+
+# Version control.
+.git
+.gitignore
+
+# Other.
+README.md

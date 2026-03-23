@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "steoates.autoimport",
+    "usernamehw.errorlens",
+    "dbaeumer.vscode-eslint",
+    "wix.vscode-import-cost",
+    "oderwat.indent-rainbow",
+    "YoavBls.pretty-ts-errors",
+    "christian-kohler.path-intellisense",
+    "esbenp.prettier-vscode",
+    "vitest.explorer"
+  ]
+}

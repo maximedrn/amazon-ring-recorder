@@ -1,0 +1,19 @@
+# Node dependencies.
+node_modules
+
+# Build output.
+dist
+*.tsbuildinfo
+
+# Git repository.
+.git
+
+# Package manager files.
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+
+# Operating system files.
+.DS_Store
+.Thumbs.db
