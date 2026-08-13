@@ -8,12 +8,22 @@ import { execa } from "execa";
 import { existsSync, mkdirSync, rmSync, statSync } from "fs";
 import { Listr, type ListrTask } from "listr2";
 import { NodeSSH, SSHExecCommandResponse } from "node-ssh";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import { type Logger } from "pino";
+
+const DeployImageSource = {
+  Build: "build",
+  Pull: "pull",
+} as const;
+
+type DeployImageSource =
+  (typeof DeployImageSource)[keyof typeof DeployImageSource];
 
 interface DeployImageConfig {
   /** Docker image name without tag. */
   readonly name: string;
+  /** How the image is made available locally before export. */
+  readonly source: DeployImageSource;
   /** Container user used to own persistent volume data, when applicable. */
   readonly containerUser: string | null;
 }
@@ -33,6 +43,10 @@ interface DeployConfig {
   readonly composeFile: string;
   /** Local `.env` file uploaded to the remote host. */
   readonly envFile: string;
+  /** Tailscale Serve/Funnel config uploaded to the remote host. */
+  readonly serveConfigFile: string;
+  /** Ntfy provisioning entrypoint, mounted in the ntfy container. */
+  readonly ntfyEntrypointFile: string;
 }
 
 /**
@@ -44,16 +58,30 @@ const DEPLOY_CONFIG = {
   images: [
     {
       name: "amazon-ring-recorder",
+      source: DeployImageSource.Build,
       containerUser: "recorder",
     },
     {
       name: "filebrowser",
+      source: DeployImageSource.Build,
+      containerUser: null,
+    },
+    {
+      name: "tailscale/tailscale",
+      source: DeployImageSource.Pull,
+      containerUser: null,
+    },
+    {
+      name: "binwiederhier/ntfy",
+      source: DeployImageSource.Pull,
       containerUser: null,
     },
   ],
   imageTar: join("dist", "amazon-ring-recorder.tar"),
   composeFile: "docker-compose.yaml",
   envFile: ".env",
+  serveConfigFile: join("config", "serve.json"),
+  ntfyEntrypointFile: join("config", "ntfy-entrypoint.sh"),
 } as const satisfies DeployConfig;
 
 // Force development mode for the deploy script — always pretty-print locally
@@ -286,8 +314,8 @@ const remoteExecution = async (
 };
 
 /**
- * Builds every Docker Compose image for the target architecture and exports
- * all expected images into one Docker tar archive.
+ * Builds project images, pulls upstream images for the target architecture,
+ * and exports every required image into one Docker tar archive.
  *
  * @param {string} arch - Target Docker platform.
  * @returns {ListrTask[]} Build task list.
@@ -298,7 +326,7 @@ const buildTasks = (arch: string): ListrTask[] => [
     task: async (): Promise<void> => {
       await execa(
         "docker",
-        ["compose", "-f", DEPLOY_CONFIG.composeFile, "build"],
+        ["compose", "-f", DEPLOY_CONFIG.composeFile, DeployImageSource.Build],
         {
           env: {
             ...process.env,
@@ -308,6 +336,19 @@ const buildTasks = (arch: string): ListrTask[] => [
           stderr: "pipe",
         },
       );
+
+      for (const image of DEPLOY_CONFIG.images) {
+        if (image.source !== DeployImageSource.Pull) continue;
+
+        await execa(
+          "docker",
+          [DeployImageSource.Pull, "--platform", arch, imageReference(image)],
+          {
+            stdout: "ignore",
+            stderr: "pipe",
+          },
+        );
+      }
 
       for (const image of DEPLOY_CONFIG.images) {
         const reference: string = imageReference(image);
@@ -322,10 +363,13 @@ const buildTasks = (arch: string): ListrTask[] => [
         );
 
         if (inspect.exitCode !== 0) {
+          const action: string =
+            image.source === DeployImageSource.Build
+              ? "built by Docker Compose"
+              : "pulled";
+
           throw new Error(
-            `Expected Docker image ${reference} was not produced by ` +
-              `${DEPLOY_CONFIG.composeFile}. Ensure the corresponding Compose ` +
-              `service declares \`image: ${reference}\` and has a build section.`,
+            `Expected Docker image ${reference} was not ${action}.`,
           );
         }
       }
@@ -344,6 +388,8 @@ const buildTasks = (arch: string): ListrTask[] => [
         "docker",
         [
           "save",
+          "--platform",
+          arch,
           "-o",
           DEPLOY_CONFIG.imageTar,
           ...DEPLOY_CONFIG.images.map(imageReference),
@@ -456,6 +502,30 @@ const copyFileTasks = (): ListrTask<TaskContext>[] => [
       await context.ssh.putFile(
         DEPLOY_CONFIG.composeFile,
         join(context.remoteHome, DEPLOY_CONFIG.composeFile),
+      );
+    },
+  },
+  {
+    title: `Upload ${DEPLOY_CONFIG.serveConfigFile} Tailscale config`,
+    task: async (context: TaskContext): Promise<void> => {
+      const remoteConfigDirectory: string = join(
+        context.remoteHome,
+        dirname(DEPLOY_CONFIG.serveConfigFile),
+      );
+
+      await remoteExecution(
+        context,
+        `mkdir -p ${shellQuote(remoteConfigDirectory)}`,
+      );
+
+      await context.ssh.putFile(
+        DEPLOY_CONFIG.serveConfigFile,
+        join(context.remoteHome, DEPLOY_CONFIG.serveConfigFile),
+      );
+
+      await context.ssh.putFile(
+        DEPLOY_CONFIG.ntfyEntrypointFile,
+        join(context.remoteHome, DEPLOY_CONFIG.ntfyEntrypointFile),
       );
     },
   },

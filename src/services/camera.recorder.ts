@@ -1,6 +1,11 @@
 import { type Env } from "@/config/env";
+import {
+  NtfyNotifier,
+  type RecordingFinishedDetails,
+} from "@/services/notifier.service";
 import { OutputPattern, RecordingStatus } from "@/types";
 import { buildOutputPattern } from "@/utils/helpers";
+import { basename } from "path";
 import { type Logger } from "pino";
 import { PushNotificationDingV2, type RingCamera } from "ring-client-api";
 import {
@@ -33,10 +38,12 @@ const MAX_RECORDING_MS = 3 * 60_000;
  * A recording starts when a motion/human push notification is received.
  * Every subsequent notification resets an inactivity timer.
  *
- * If no new motion notification is received for MOTION_INACTIVITY_MS,
- * the Ring streaming session is stopped.
+ * Each motion event produces a single continuous MP4 file (no segments):
+ * the session is stopped once no new motion notification is received for
+ * MOTION_INACTIVITY_MS, with MAX_RECORDING_MS as an absolute upper bound.
  *
- * A second timer enforces MAX_RECORDING_MS as an absolute upper bound.
+ * When a recording finishes, a push notification is published through the
+ * {@link NtfyNotifier}.
  */
 class CameraRecorder {
   /** Child logger pre-bound with camera metadata for every log line. */
@@ -65,13 +72,26 @@ class CameraRecorder {
   private maxRecordingTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * @param camera Ring camera to monitor.
-   * @param env Validated environment configuration.
-   * @param logger Root application logger.
+   * Wall-clock start of the current recording session, used to compute
+   * its duration for the completion notification.
+   */
+  private recordingStartedAt: Date | null = null;
+
+  /**
+   * Absolute output file path of the current recording session.
+   */
+  private currentOutputPattern: OutputPattern | null = null;
+
+  /**
+   * @param {RingCamera} camera Ring camera to monitor.
+   * @param {Env} env Validated environment configuration.
+   * @param {NtfyNotifier} notifier Push notification publisher.
+   * @param {Logger} logger Root application logger.
    */
   constructor(
     private readonly camera: RingCamera,
     private readonly env: Env,
+    private readonly notifier: NtfyNotifier,
     logger: Logger,
   ) {
     this.logger = logger.child({
@@ -124,10 +144,7 @@ class CameraRecorder {
   public async stop(): Promise<void> {
     this.logger.info("Stopping camera recorder.");
 
-    for (const subscription of this.subscriptions) {
-      subscription.unsubscribe();
-    }
-
+    for (const subscription of this.subscriptions) subscription.unsubscribe();
     this.subscriptions = [];
 
     this.clearMotionStopTimer();
@@ -200,7 +217,7 @@ class CameraRecorder {
        * StreamVideo() establishes the Ring streaming session and starts
        * ring-client-api's FFmpeg transcoding process using the options below.
        */
-      const session = await this.camera.streamVideo(
+      const session: StreamingSession = await this.camera.streamVideo(
         this.buildFfmpegOptions(outputPattern),
       );
 
@@ -223,6 +240,8 @@ class CameraRecorder {
 
       this.streamingSession = session;
       this.status = RecordingStatus.Active;
+      this.recordingStartedAt = new Date();
+      this.currentOutputPattern = outputPattern;
 
       this.startMaxRecordingTimer();
 
@@ -247,6 +266,8 @@ class CameraRecorder {
 
         this.streamingSession = null;
         this.status = RecordingStatus.Idle;
+
+        void this.notifyRecordingFinished("Call ended by Ring.");
       });
 
       this.logger.info({ outputPattern }, "Recording started successfully.");
@@ -309,7 +330,7 @@ class CameraRecorder {
      * session identity, it will then recognize this as an already-cleaned-up
      * session instead of altering future state.
      */
-    const session = this.streamingSession;
+    const session: StreamingSession | null = this.streamingSession;
 
     this.streamingSession = null;
     this.status = RecordingStatus.Idle;
@@ -332,12 +353,54 @@ class CameraRecorder {
       session.stop();
 
       this.logger.info({ reason }, "Recording stopped cleanly.");
+
+      void this.notifyRecordingFinished(reason);
     } catch (error: unknown) {
       this.logger.error(
         { error, reason },
         "Error while stopping recording session.",
       );
     }
+  }
+
+  /**
+   * Publishes a "recording finished" notification for the session that is
+   * being torn down.
+   *
+   * No notification is sent when the recording never became Active (e.g.
+   * A startup cancelled before the streaming session was available)..
+   *
+   * @param {string} reason Human-readable reason the recording stopped.
+   */
+  private async notifyRecordingFinished(reason: string): Promise<void> {
+    const startedAt: Date | null = this.recordingStartedAt;
+    const outputPattern: OutputPattern | null = this.currentOutputPattern;
+
+    this.recordingStartedAt = null;
+    this.currentOutputPattern = null;
+
+    if (startedAt === null) {
+      this.logger.debug(
+        { reason },
+        "No recording notification sent: session never became active.",
+      );
+      return;
+    }
+
+    const durationSeconds: number = Math.max(
+      1,
+      Math.round((Date.now() - startedAt.getTime()) / 1000),
+    );
+
+    const details: RecordingFinishedDetails = {
+      cameraName: this.camera.name,
+      durationSeconds,
+      filename:
+        outputPattern === null ? "unknown.mp4" : basename(outputPattern),
+      reason,
+    };
+
+    await this.notifier.notifyRecordingFinished(details);
   }
 
   /**
@@ -369,10 +432,7 @@ class CameraRecorder {
    * Clears the current motion inactivity timer.
    */
   private clearMotionStopTimer(): void {
-    if (!this.motionStopTimer) {
-      return;
-    }
-
+    if (!this.motionStopTimer) return;
     clearTimeout(this.motionStopTimer);
     this.motionStopTimer = null;
   }
@@ -405,10 +465,7 @@ class CameraRecorder {
    * Clears the maximum recording duration timer.
    */
   private clearMaxRecordingTimer(): void {
-    if (!this.maxRecordingTimer) {
-      return;
-    }
-
+    if (!this.maxRecordingTimer) return;
     clearTimeout(this.maxRecordingTimer);
     this.maxRecordingTimer = null;
   }
@@ -416,11 +473,14 @@ class CameraRecorder {
   /**
    * Builds the FFmpeg argument list used by ring-client-api.
    *
-   * The output is segmented into individual MP4 files. SEGMENT_SECONDS only
-   * determines the duration of each file; it does not determine the total
-   * duration of the streaming session.
+   * The output is a single continuous MP4 file for the whole recording
+   * session (no segmentation). Fragmented MP4 flags write the movie header
+   * upfront, so the file stays playable even if the process is killed
+   * mid-recording (ring-client-api stops ffmpeg with SIGKILL, which never
+   * finalizes the container).
    *
-   * @param outputPattern Output filename pattern.
+   * @param {string} outputPattern Output file path.
+   * @returns {FfmpegOptions} FFmpeg options.
    */
   private buildFfmpegOptions(outputPattern: string): FfmpegOptions {
     return {
@@ -465,26 +525,14 @@ class CameraRecorder {
         "-flags",
         "+global_header",
         /*
-         * Write independent MP4 segments.
+         * Fragment the MP4 at keyframe boundaries with an initial empty
+         * `moov` atom, so the file is playable even without a finalize pass.
          */
+        "-movflags",
+        // eslint-disable-next-line no-secrets/no-secrets
+        "frag_keyframe+empty_moov+default_base_moof",
         "-f",
-        "segment",
-        "-segment_time",
-        String(this.env.SEGMENT_SECONDS),
-        "-segment_format",
         "mp4",
-        /*
-         * Start every generated segment at timestamp zero.
-         */
-        "-reset_timestamps",
-        "1",
-        "-avoid_negative_ts",
-        "make_zero",
-        /*
-         * Make completed MP4 segments friendly to HTTP/browser playback.
-         */
-        "-segment_format_options",
-        "movflags=+faststart",
         "-y",
         outputPattern,
       ],

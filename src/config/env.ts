@@ -14,18 +14,31 @@ const envSchema = z.object({
   TOKEN_DIRECTORY: z
     .string()
     .transform((value: string) => path.resolve(value)),
-  SEGMENT_SECONDS: z.coerce
-    .number({ error: "SEGMENT_SECONDS must be a number." })
-    .int()
-    .positive()
-    .default(31),
   CAMERA_POLLING_SECONDS: z.coerce
     .number({ error: "CAMERA_POLLING_SECONDS must be a number." })
     .int()
     .positive()
     .default(20),
-  LOG_LEVEL: z.nativeEnum(LogLevel).default(LogLevel.Info),
-  NODE_ENV: z.nativeEnum(NodeEnv).default(NodeEnv.Production),
+  LOG_LEVEL: z.enum(LogLevel).default(LogLevel.Info),
+  NODE_ENV: z.enum(NodeEnv).default(NodeEnv.Production),
+  NTFY_URL: z
+    .string({ error: "NTFY_URL must be a non-empty string." })
+    .min(1, "NTFY_URL cannot be empty.")
+    .refine((value: string): boolean => {
+      try {
+        new URL(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }, "NTFY_URL must be a valid URL.")
+    .default("http://ntfy:80"),
+  NTFY_TOPIC: z
+    .string({ error: "NTFY_TOPIC must be a non-empty string." })
+    .min(1, "NTFY_TOPIC cannot be empty.")
+    .default("recordings"),
+  NTFY_USER: z.string().default("recorder"),
+  NTFY_PASSWORD: z.string().default(""),
 });
 
 /**

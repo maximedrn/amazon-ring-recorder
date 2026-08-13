@@ -17,6 +17,9 @@ services:
     env_file:
       - .env
 
+    depends_on:
+      - ntfy
+
     logging:
       driver: json-file
       options:
@@ -44,6 +47,12 @@ services:
     group_add:
       - "100"
 
+    # Initial admin created automatically on first start (see
+    # Dockerfile.filebrowser / config/filebrowser-entrypoint.sh).
+    environment:
+      FILEBROWSER_ADMIN_USER: ${FILEBROWSER_ADMIN_USER:-admin}
+      FILEBROWSER_ADMIN_PASSWORD: ${FILEBROWSER_ADMIN_PASSWORD:-}
+
     ports:
       - "${FILEBROWSER_BIND:-127.0.0.1}:${FILEBROWSER_PORT:-8080}:80"
 
@@ -61,6 +70,72 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: unless-stopped
+
+    # One-time user/ACL provisioning from .env passwords, then `ntfy serve`.
+    entrypoint: ["sh", "/config/ntfy-entrypoint.sh"]
+
+    ports:
+      - "127.0.0.1:${NTFY_PORT:-8081}:80"
+
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:-}
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_LOG_LEVEL: info
+      NTFY_TOPIC: ${NTFY_TOPIC:-recordings}
+      NTFY_ADMIN_USER: ${NTFY_ADMIN_USER:-admin}
+      NTFY_ADMIN_PASSWORD: ${NTFY_ADMIN_PASSWORD:-}
+      NTFY_USER: ${NTFY_USER:-recorder}
+      NTFY_PASSWORD: ${NTFY_PASSWORD:-}
+
+    volumes:
+      - ntfy_data:/var/lib/ntfy
+      - ./config:/config:ro
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    hostname: ${TAILSCALE_HOSTNAME:-ring-recorder}
+    restart: unless-stopped
+
+    network_mode: host
+
+    environment:
+      TS_AUTHKEY: ${TAILSCALE_AUTH_KEY:-}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_EXTRA_ARGS: ${TAILSCALE_EXTRA_ARGS:-}
+
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - ./config:/config:ro
+
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    cap_add:
+      - NET_ADMIN
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
 volumes:
   filebrowser_config:
   filebrowser_database:
+  ntfy_data:
+  tailscale_state:

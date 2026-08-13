@@ -14,11 +14,13 @@ const buildTimestamp = (date: Date = new Date()): string => {
 };
 
 /**
- * Builds a typed, filesystem-safe ffmpeg segment output pattern for a camera.
+ * Builds a typed, filesystem-safe output file path for a camera.
  *
- * Uses `slugify` to normalise the camera name (lowercase, unicode-safe,
- * strips special chars), then appends a timestamp and a zero-padded segment
- * index placeholder for ffmpeg's segment muxer.
+ * Uses `slugify` to normalize the camera name (lowercase, unicode-safe,
+ * strips special chars), then appends a timestamp of the recording start.
+ *
+ * Each motion event writes a single continuous MP4 file: the recording
+ * session duration is bounded by motion inactivity, not by file segmentation.
  *
  * The return value is branded as {@link OutputPattern} so it cannot be
  * confused with an arbitrary `string`.
@@ -26,7 +28,7 @@ const buildTimestamp = (date: Date = new Date()): string => {
  * @param {string} outputDirectory - Directory where recordings are written.
  * @param {string} cameraName - Raw camera name from the Ring API.
  * @param {Date} date - Recording start time. Defaults to `new Date()`.
- * @returns {OutputPattern} Branded absolute output pattern string.
+ * @returns {OutputPattern} Branded absolute output file path.
  */
 const buildOutputPattern = (
   outputDirectory: string,
@@ -40,9 +42,23 @@ const buildOutputPattern = (
   });
 
   const timestamp: string = buildTimestamp(date);
-  const filename: string = `${slug}-${timestamp}-%04d.mp4`;
+  const filename: string = `${slug}-${timestamp}.mp4`;
 
   return path.join(outputDirectory, filename) as OutputPattern;
 };
 
-export { buildOutputPattern, buildTimestamp };
+/**
+ * Formats a duration in seconds as a compact human-readable string,
+ * e.g. `1m 05s`.
+ *
+ * @param {number} seconds - Duration in whole seconds. Must be positive.
+ * @returns {string} Formatted duration string.
+ */
+const formatDuration = (seconds: number): string => {
+  const minutes: number = Math.floor(seconds / 60);
+  const remainingSeconds: number = seconds % 60;
+  if (minutes === 0) return `${String(remainingSeconds).padStart(2, "0")}s`;
+  return `${minutes}m ${String(remainingSeconds).padStart(2, "0")}s`;
+};
+
+export { buildOutputPattern, buildTimestamp, formatDuration };

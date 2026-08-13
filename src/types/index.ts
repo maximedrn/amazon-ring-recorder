@@ -60,5 +60,5 @@ export {
   RecordingStatus,
   type CameraId,
   type OutputPattern,
-  type RefreshToken,
+  type RefreshToken
 };

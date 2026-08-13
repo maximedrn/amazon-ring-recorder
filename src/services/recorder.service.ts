@@ -1,5 +1,6 @@
 import { type Env } from "@/config/env";
 import { CameraRecorder } from "@/services/camera.recorder";
+import { NtfyNotifier } from "@/services/notifier.service";
 import { type TokenManager } from "@/services/token.manager";
 import { LogLevel, type RefreshToken } from "@/types";
 import ffmpegStatic from "ffmpeg-static";
@@ -20,6 +21,9 @@ class RingRecorderService {
   /** Lazily initialized Ring API client. */
   private ringApi: RingApi | null = null;
 
+  /** Push notification publisher shared by every camera recorder. */
+  private readonly notifier: NtfyNotifier;
+
   /**
    * @param {Env} env - Validated, frozen environment configuration.
    * @param {TokenManager} tokenManager - Token persistence helper.
@@ -29,7 +33,9 @@ class RingRecorderService {
     private readonly env: Env,
     private readonly tokenManager: TokenManager,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    this.notifier = new NtfyNotifier(env, logger);
+  }
 
   /**
    * Connects to the Ring API, discovers all cameras, and starts monitoring.
@@ -80,6 +86,7 @@ class RingRecorderService {
       const recorder: CameraRecorder = new CameraRecorder(
         camera,
         this.env,
+        this.notifier,
         this.logger,
       );
       recorder.subscribe();

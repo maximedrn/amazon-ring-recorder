@@ -1,6 +1,6 @@
 # Amazon Ring Recorder
 
-Records segmented MP4 clips whenever motion is detected. Tokens rotate automatically. Designed to run forever in a container.
+Records one continuous MP4 file per motion event and sends a push notification through a self-hosted ntfy server when a recording finishes. Tokens rotate automatically. Designed to run forever in a container.
 
 > **Disclaimer**: this project is for educational and personal learning purposes only. It relies on [`ring-client-api`](https://github.com/dgreif/ring), an unofficial, reverse-engineered API that is not endorsed by, affiliated with, or supported by Amazon Ring. Use of this API may violate [Ring's Terms of Service](https://ring.com/terms). By using this project, you accept full responsibility for any consequences.
 
@@ -19,6 +19,7 @@ Records segmented MP4 clips whenever motion is detected. Tokens rotate automatic
 - [Node.js](https://nodejs.org)
 - [Bun](https://bun.sh)
 - [Lima](https://github.com/lima-vm/lima) and `lima-additional-guestagents` for local deployment tests
+- [Tailscale](https://tailscale.com) account (for HTTPS access, see below)
 
 ## Installation
 

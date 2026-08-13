@@ -6,3 +6,6 @@ COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
 COPY --chown=1000:1000 config/.filebrowser.json /defaults/settings.json
+COPY --chown=1000:1000 --chmod=755 config/filebrowser-entrypoint.sh /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
