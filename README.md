@@ -19,7 +19,7 @@ Records one continuous MP4 file per motion event and sends a push notification t
 - [Node.js](https://nodejs.org)
 - [Bun](https://bun.sh)
 - [Lima](https://github.com/lima-vm/lima) and `lima-additional-guestagents` for local deployment tests
-- [Tailscale](https://tailscale.com) account (for HTTPS access, see below)
+- A domain managed by [Cloudflare](https://cloudflare.com) (for HTTPS access, see below)
 
 ## Installation
 

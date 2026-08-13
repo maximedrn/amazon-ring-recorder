@@ -41,7 +41,7 @@ if [ ! -f "${MARKER_FILE}" ]; then
     ntfy user add --role=admin --ignore-exists "${NTFY_ADMIN_USER:-admin}"
   NTFY_PASSWORD="${NTFY_PASSWORD}" \
     ntfy user add --ignore-exists "${NTFY_USER:-recorder}"
-  ntfy access "${NTFY_USER:-recorder}" "${NTFY_TOPIC:-recordings}" write-only
+  ntfy access "${NTFY_USER:-recorder}" "${NTFY_TOPIC:-recordings}" read-write
 
   touch "${MARKER_FILE}"
   echo "ntfy provisioning complete."

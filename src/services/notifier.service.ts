@@ -1,5 +1,4 @@
 import { type Env } from "@/config/env";
-import { formatDuration } from "@/utils/helpers";
 import { type Logger } from "pino";
 
 /**
@@ -30,6 +29,8 @@ interface NtfyPublishInput {
   readonly message: string;
   /** Comma-separated list of emoji tags. */
   readonly tags: readonly string[];
+  /** URL opened when the notification is tapped (e.g. A public share link). */
+  readonly clickUrl?: string;
 }
 
 /**
@@ -68,27 +69,12 @@ class NtfyNotifier {
   public async notifyRecordingFinished(
     details: RecordingFinishedDetails,
   ): Promise<void> {
-    const { cameraName, durationSeconds, filename, reason, shareUrl } =
-      details;
-
-    const messageLines: string[] = [
-      `Camera : ${cameraName}`,
-      `Duration : ${formatDuration(durationSeconds)}`,
-      `File : ${filename}`,
-      `Reason : ${reason}`,
-    ];
-
-    if (shareUrl) {
-      messageLines.push(`Link : ${shareUrl}`);
-    }
-
-    const message: string = messageLines.join("\n");
-
     try {
       await this.publish({
         title: "Recording finished",
-        message,
+        message: "A new recording has finished!",
         tags: ["video_camera"],
+        ...(details.shareUrl ? { clickUrl: details.shareUrl } : {}),
       });
     } catch (error: unknown) {
       this.logger.error(
@@ -107,15 +93,21 @@ class NtfyNotifier {
   private async publish(input: NtfyPublishInput): Promise<void> {
     const url: string = `${this.env.NTFY_URL}/${this.env.NTFY_TOPIC}`;
 
-    const headers: Record<string, string> = {
-      Title: input.title,
-      Tags: input.tags.join(","),
-    };
+    const headers: Headers = new Headers();
+    headers.set("Title", input.title);
+    headers.set("Tags", input.tags.join(","));
+
+    if (input.clickUrl) {
+      headers.set("Click", input.clickUrl);
+      headers.set("X-Click", input.clickUrl);
+    }
 
     if (this.env.NTFY_PASSWORD) {
       const credentials: string = `${this.env.NTFY_USER}:${this.env.NTFY_PASSWORD}`;
-      headers["Authorization"] =
-        `Basic ${Buffer.from(credentials).toString("base64")}`;
+      headers.set(
+        "Authorization",
+        `Basic ${Buffer.from(credentials).toString("base64")}`,
+      );
     }
 
     this.logger.debug({ url }, "Publishing ntfy notification.");

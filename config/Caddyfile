@@ -1,0 +1,9 @@
+http://{$RING_DOMAIN} {
+	handle {
+		reverse_proxy filebrowser:80
+	}
+}
+
+http://{$NTFY_DOMAIN} {
+	reverse_proxy ntfy:80
+}

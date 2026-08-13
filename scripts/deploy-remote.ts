@@ -43,10 +43,8 @@ interface DeployConfig {
   readonly composeFile: string;
   /** Local `.env` file uploaded to the remote host. */
   readonly envFile: string;
-  /** Tailscale Serve/Funnel config uploaded to the remote host. */
-  readonly serveConfigFile: string;
-  /** Ntfy provisioning entrypoint, mounted in the ntfy container. */
-  readonly ntfyEntrypointFile: string;
+  /** Configuration files uploaded to the remote host. */
+  readonly configFiles: string[];
 }
 
 /**
@@ -67,12 +65,17 @@ const DEPLOY_CONFIG = {
       containerUser: null,
     },
     {
-      name: "tailscale/tailscale",
+      name: "binwiederhier/ntfy",
       source: DeployImageSource.Pull,
       containerUser: null,
     },
     {
-      name: "binwiederhier/ntfy",
+      name: "caddy",
+      source: DeployImageSource.Pull,
+      containerUser: null,
+    },
+    {
+      name: "cloudflare/cloudflared",
       source: DeployImageSource.Pull,
       containerUser: null,
     },
@@ -80,8 +83,10 @@ const DEPLOY_CONFIG = {
   imageTar: join("dist", "amazon-ring-recorder.tar"),
   composeFile: "docker-compose.yaml",
   envFile: ".env",
-  serveConfigFile: join("config", "serve.json"),
-  ntfyEntrypointFile: join("config", "ntfy-entrypoint.sh"),
+  configFiles: [
+    join("config", "Caddyfile"),
+    join("config", "ntfy-entrypoint.sh"),
+  ],
 } as const satisfies DeployConfig;
 
 // Force development mode for the deploy script — always pretty-print locally
@@ -116,8 +121,6 @@ const PrivilegeMode = {
   SudoPassword: "sudo-password",
   None: "none",
 } as const;
-
-type PrivilegeMode = (typeof PrivilegeMode)[keyof typeof PrivilegeMode];
 
 /**
  * Privilege escalation mode available on the remote host.
@@ -506,26 +509,27 @@ const copyFileTasks = (): ListrTask<TaskContext>[] => [
     },
   },
   {
-    title: `Upload ${DEPLOY_CONFIG.serveConfigFile} Tailscale config`,
+    title: "Upload configuration files",
     task: async (context: TaskContext): Promise<void> => {
-      const remoteConfigDirectory: string = join(
-        context.remoteHome,
-        dirname(DEPLOY_CONFIG.serveConfigFile),
-      );
+      await Promise.all(
+        DEPLOY_CONFIG.configFiles.map(
+          async (configFile: string): Promise<void> => {
+            const remoteConfigDirectory: string = join(
+              context.remoteHome,
+              dirname(configFile),
+            );
 
-      await remoteExecution(
-        context,
-        `mkdir -p ${shellQuote(remoteConfigDirectory)}`,
-      );
+            await remoteExecution(
+              context,
+              `mkdir -p ${shellQuote(remoteConfigDirectory)}`,
+            );
 
-      await context.ssh.putFile(
-        DEPLOY_CONFIG.serveConfigFile,
-        join(context.remoteHome, DEPLOY_CONFIG.serveConfigFile),
-      );
-
-      await context.ssh.putFile(
-        DEPLOY_CONFIG.ntfyEntrypointFile,
-        join(context.remoteHome, DEPLOY_CONFIG.ntfyEntrypointFile),
+            await context.ssh.putFile(
+              configFile,
+              join(context.remoteHome, configFile),
+            );
+          },
+        ),
       );
     },
   },
