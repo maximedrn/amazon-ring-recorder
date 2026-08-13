@@ -1,6 +1,7 @@
 import { type Env } from "@/config/env";
 import { CameraRecorder } from "@/services/camera.recorder";
 import { NtfyNotifier } from "@/services/notifier.service";
+import { FilebrowserShareService } from "@/services/share.service";
 import { type TokenManager } from "@/services/token.manager";
 import { LogLevel, type RefreshToken } from "@/types";
 import ffmpegStatic from "ffmpeg-static";
@@ -24,6 +25,9 @@ class RingRecorderService {
   /** Push notification publisher shared by every camera recorder. */
   private readonly notifier: NtfyNotifier;
 
+  /** Public share link creator shared by every camera recorder. */
+  private readonly shareService: FilebrowserShareService;
+
   /**
    * @param {Env} env - Validated, frozen environment configuration.
    * @param {TokenManager} tokenManager - Token persistence helper.
@@ -35,6 +39,7 @@ class RingRecorderService {
     private readonly logger: Logger,
   ) {
     this.notifier = new NtfyNotifier(env, logger);
+    this.shareService = new FilebrowserShareService(env, logger);
   }
 
   /**
@@ -87,6 +92,7 @@ class RingRecorderService {
         camera,
         this.env,
         this.notifier,
+        this.shareService,
         this.logger,
       );
       recorder.subscribe();

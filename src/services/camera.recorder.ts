@@ -3,6 +3,7 @@ import {
   NtfyNotifier,
   type RecordingFinishedDetails,
 } from "@/services/notifier.service";
+import { FilebrowserShareService } from "@/services/share.service";
 import { OutputPattern, RecordingStatus } from "@/types";
 import { buildOutputPattern } from "@/utils/helpers";
 import { basename } from "path";
@@ -86,12 +87,14 @@ class CameraRecorder {
    * @param {RingCamera} camera Ring camera to monitor.
    * @param {Env} env Validated environment configuration.
    * @param {NtfyNotifier} notifier Push notification publisher.
+   * @param {FilebrowserShareService} shareService Public share link creator.
    * @param {Logger} logger Root application logger.
    */
   constructor(
     private readonly camera: RingCamera,
     private readonly env: Env,
     private readonly notifier: NtfyNotifier,
+    private readonly shareService: FilebrowserShareService,
     logger: Logger,
   ) {
     this.logger = logger.child({
@@ -392,12 +395,19 @@ class CameraRecorder {
       Math.round((Date.now() - startedAt.getTime()) / 1000),
     );
 
+    let shareUrl: string | undefined;
+    if (outputPattern !== null) {
+      shareUrl =
+        (await this.shareService.createShareLink(outputPattern)) ?? undefined;
+    }
+
     const details: RecordingFinishedDetails = {
       cameraName: this.camera.name,
       durationSeconds,
       filename:
         outputPattern === null ? "unknown.mp4" : basename(outputPattern),
       reason,
+      ...(shareUrl ? { shareUrl } : {}),
     };
 
     await this.notifier.notifyRecordingFinished(details);

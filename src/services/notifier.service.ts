@@ -19,6 +19,8 @@ interface RecordingFinishedDetails {
   readonly filename: string;
   /** Human-readable reason why the recording stopped. */
   readonly reason: string;
+  /** Public filebrowser share link, when one could be created. */
+  readonly shareUrl?: string;
 }
 
 interface NtfyPublishInput {
@@ -66,14 +68,21 @@ class NtfyNotifier {
   public async notifyRecordingFinished(
     details: RecordingFinishedDetails,
   ): Promise<void> {
-    const { cameraName, durationSeconds, filename, reason } = details;
+    const { cameraName, durationSeconds, filename, reason, shareUrl } =
+      details;
 
-    const message: string = [
+    const messageLines: string[] = [
       `Camera : ${cameraName}`,
       `Duration : ${formatDuration(durationSeconds)}`,
       `File : ${filename}`,
       `Reason : ${reason}`,
-    ].join("\n");
+    ];
+
+    if (shareUrl) {
+      messageLines.push(`Link : ${shareUrl}`);
+    }
+
+    const message: string = messageLines.join("\n");
 
     try {
       await this.publish({

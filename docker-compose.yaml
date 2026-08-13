@@ -47,11 +47,13 @@ services:
     group_add:
       - "100"
 
-    # Initial admin created automatically on first start (see
-    # Dockerfile.filebrowser / config/filebrowser-entrypoint.sh).
+    # Initial admin and share-only user created automatically on first
+    # start (see Dockerfile.filebrowser / config/filebrowser-entrypoint.sh).
     environment:
       FILEBROWSER_ADMIN_USER: ${FILEBROWSER_ADMIN_USER:-admin}
       FILEBROWSER_ADMIN_PASSWORD: ${FILEBROWSER_ADMIN_PASSWORD:-}
+      FILEBROWSER_SHARE_USER: ${FILEBROWSER_SHARE_USER:-share}
+      FILEBROWSER_SHARE_PASSWORD: ${FILEBROWSER_SHARE_PASSWORD:-}
 
     ports:
       - "${FILEBROWSER_BIND:-127.0.0.1}:${FILEBROWSER_PORT:-8080}:80"

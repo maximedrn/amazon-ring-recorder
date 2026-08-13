@@ -4,6 +4,21 @@ import { existsSync, mkdirSync } from "fs";
 import path from "path";
 import { z } from "zod";
 
+/**
+ * Returns `true` when `value` parses as an absolute URL.
+ *
+ * @param {string} value - Candidate URL.
+ * @returns {boolean} URL validity.
+ */
+const isValidUrl = (value: string): boolean => {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const envSchema = z.object({
   REFRESH_TOKEN: z
     .string({ error: "REFRESH_TOKEN is required." })
@@ -39,6 +54,20 @@ const envSchema = z.object({
     .default("recordings"),
   NTFY_USER: z.string().default("recorder"),
   NTFY_PASSWORD: z.string().default(""),
+  FILEBROWSER_URL: z
+    .string({ error: "FILEBROWSER_URL must be a non-empty string." })
+    .min(1, "FILEBROWSER_URL cannot be empty.")
+    .refine(isValidUrl, "FILEBROWSER_URL must be a valid URL.")
+    .default("http://filebrowser:80"),
+  FILEBROWSER_PUBLIC_URL: z
+    .string()
+    .default("")
+    .refine(
+      (value: string): boolean => value === "" || isValidUrl(value),
+      "FILEBROWSER_PUBLIC_URL must be a valid URL.",
+    ),
+  FILEBROWSER_SHARE_USER: z.string().default("share"),
+  FILEBROWSER_SHARE_PASSWORD: z.string().default(""),
 });
 
 /**
