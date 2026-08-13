@@ -4,21 +4,25 @@ services:
   amazon-ring-recorder:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.app
       target: runtime
     image: amazon-ring-recorder:latest
     container_name: amazon-ring-recorder
     restart: unless-stopped
+
     volumes:
       - ${TOKEN_DIRECTORY:-./data}:/app/data
       - ${OUTPUT_DIRECTORY:-./data/recordings}:/app/data/recordings
+
     env_file:
       - .env
+
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
+
     deploy:
       resources:
         limits:
@@ -28,6 +32,32 @@ services:
           cpus: "0.25"
           memory: 128M
 
+  filebrowser:
+    build:
+      context: .
+      dockerfile: Dockerfile.filebrowser
+
+    image: filebrowser:latest
+    container_name: filebrowser
+    restart: unless-stopped
+
+    ports:
+      - "${FILEBROWSER_BIND:-127.0.0.1}:${FILEBROWSER_PORT:-8080}:80"
+
+    volumes:
+      - ${OUTPUT_DIRECTORY:-./data/recordings}:/srv:ro
+      - filebrowser_config:/config
+      - filebrowser_database:/database
+
+    depends_on:
+      - amazon-ring-recorder
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
 volumes:
-  ring_token_data:
-    driver: local
+  filebrowser_config:
+  filebrowser_database:

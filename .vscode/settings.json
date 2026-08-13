@@ -7,5 +7,19 @@
     "source.fixAll.eslint": "always",
     "source.organizeImports": "always"
   },
-  "js/ts.tsdk.path": "node_modules/typescript/lib"
+  "js/ts.tsdk.path": "node_modules/typescript/lib",
+  "cSpell.words": [
+    "addgroup",
+    "adduser",
+    "buildx",
+    "citty",
+    "cpus",
+    "ffprobe",
+    "mwader",
+    "nopasswd",
+    "passwordless",
+    "pgrep",
+    "raspberrypi",
+    "requiretty"
+  ]
 }

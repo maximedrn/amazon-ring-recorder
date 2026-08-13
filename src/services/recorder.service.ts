@@ -1,7 +1,7 @@
 import { type Env } from "@/config/env";
 import { CameraRecorder } from "@/services/camera.recorder";
 import { type TokenManager } from "@/services/token.manager";
-import { LogLevel } from "@/types";
+import { LogLevel, type RefreshToken } from "@/types";
 import { type Logger } from "pino";
 import { type Location, RingApi, type RingCamera } from "ring-client-api";
 
@@ -16,7 +16,7 @@ class RingRecorderService {
   /** All active per-camera recorder instances. */
   private recorders: CameraRecorder[] = [];
 
-  /** Lazily initialised Ring API client. */
+  /** Lazily initialized Ring API client. */
   private ringApi: RingApi | null = null;
 
   /**
@@ -37,7 +37,7 @@ class RingRecorderService {
    *   cannot be reached.
    */
   public async start(): Promise<void> {
-    const refreshToken = this.tokenManager.getToken();
+    const refreshToken: RefreshToken = this.tokenManager.getToken();
 
     this.ringApi = new RingApi({
       refreshToken,
@@ -83,7 +83,7 @@ class RingRecorderService {
 
     this.logger.info(
       { recorderCount: this.recorders.length },
-      "All camera recorders initialised and listening.",
+      "All camera recorders initialized and listening.",
     );
   }
 

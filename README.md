@@ -65,4 +65,4 @@ ARCH=<ARCH> bun run lima:generate
 bun run lima:deploy
 ```
 
-**Available architectures:** `amd64` (default), `arm64`
+**Available architectures:** `linux/amd64` (default), `linux/arm64`

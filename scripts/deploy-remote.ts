@@ -1,37 +1,60 @@
 import { env } from "@/config/env";
 import { createLogger } from "@/logging";
 import { NodeEnv } from "@/types";
+import { password } from "@inquirer/prompts";
+import { ListrInquirerPromptAdapter } from "@listr2/prompt-adapter-inquirer";
 import { defineCommand, runMain } from "citty";
-import Dockerode from "dockerode";
 import { execa } from "execa";
-import {
-  createWriteStream,
-  existsSync,
-  mkdirSync,
-  rmSync,
-  statSync,
-} from "fs";
+import { existsSync, mkdirSync, rmSync, statSync } from "fs";
 import { Listr, type ListrTask } from "listr2";
 import { NodeSSH, SSHExecCommandResponse } from "node-ssh";
-import { join } from "path";
+import { basename, join } from "path";
 import { type Logger } from "pino";
 
+interface DeployImageConfig {
+  /** Docker image name without tag. */
+  readonly name: string;
+  /** Container user used to own persistent volume data, when applicable. */
+  readonly containerUser: string | null;
+}
+
+type VolumeOwnerImageConfig = DeployImageConfig & {
+  readonly containerUser: string;
+};
+
+interface DeployConfig {
+  /** Local directory where the Docker image archive is written. */
+  readonly outputDirectory: string;
+  /** Docker images that must exist locally and be transferred remotely. */
+  readonly images: readonly DeployImageConfig[];
+  /** Single tar archive containing every Docker image. */
+  readonly imageTar: string;
+  /** Project-root compose file uploaded to the remote host as-is. */
+  readonly composeFile: string;
+  /** Local `.env` file uploaded to the remote host. */
+  readonly envFile: string;
+}
+
 /**
- * Static deploy configuration — centralises all path and naming constants
+ * Static deploy configuration — centralizes all path and naming constants
  * so they are never scattered across the file as bare string literals.
  */
 const DEPLOY_CONFIG = {
-  /** Local directory where the image tarball is written before upload. */
   outputDirectory: "dist",
-  /** Docker image name used for both local build and remote load. */
-  imageName: "amazon-ring-recorder",
-  /** Local path where the exported image tarball is written. */
+  images: [
+    {
+      name: "amazon-ring-recorder",
+      containerUser: "recorder",
+    },
+    {
+      name: "filebrowser",
+      containerUser: null,
+    },
+  ],
   imageTar: join("dist", "amazon-ring-recorder.tar"),
-  /** Project-root compose file uploaded to the remote host as-is. */
   composeFile: "docker-compose.yaml",
-  /** Local `.env` file uploaded to the remote host. */
   envFile: ".env",
-} as const satisfies Record<string, string>;
+} as const satisfies DeployConfig;
 
 // Force development mode for the deploy script — always pretty-print locally
 // regardless of the NODE_ENV value in .env.
@@ -53,11 +76,36 @@ interface DeployArgs {
   /** Path to the SSH identity file. */
   readonly identityFile: string;
   /**
-   * Target Docker platform architecture passed to `docker buildx build`.
+   * Target Docker platform architecture.
    * Examples: `linux/arm64`, `linux/amd64`, `linux/arm/v7`.
    */
   readonly arch: string;
 }
+
+const PrivilegeMode = {
+  Root: "root",
+  SudoNoPassword: "sudo-nopasswd",
+  SudoPassword: "sudo-password",
+  None: "none",
+} as const;
+
+type PrivilegeMode = (typeof PrivilegeMode)[keyof typeof PrivilegeMode];
+
+/**
+ * Privilege escalation mode available on the remote host.
+ */
+type RemotePrivilege =
+  | { readonly mode: typeof PrivilegeMode.Root }
+  | {
+      readonly mode: typeof PrivilegeMode.SudoNoPassword;
+      readonly pty: boolean;
+    }
+  | {
+      readonly mode: typeof PrivilegeMode.SudoPassword;
+      readonly password: string;
+      readonly pty: boolean;
+    }
+  | { readonly mode: typeof PrivilegeMode.None };
 
 /**
  * Shared Listr2 context passed between tasks.
@@ -67,78 +115,245 @@ interface TaskContext {
   ssh: NodeSSH;
   /** Absolute path of the home directory on the remote host. */
   remoteHome: string;
+  /** Privilege escalation strategy detected on the remote host. */
+  privilege: RemotePrivilege;
 }
 
 /**
- * Executes a remote SSH command and throws if the exit code is non-zero.
- *
- * @param {NodeSSH} ssh - Active SSH connection.
- * @param {string}  command - Shell command to execute on the remote host.
- * @returns {Promise<string>} Stdout of the command.
- * @throws {Error} When the remote command exits with a non-zero code.
+ * Type helper to extract the second argument of a Listr task function.
  */
-const remoteExecution = async (
-  ssh: NodeSSH,
-  command: string,
-): Promise<string> => {
-  const response: SSHExecCommandResponse = await ssh.execCommand(command);
-  if (response.code === 0) return response.stdout;
-  const { code, stderr }: { code: number | null; stderr: string } = response;
-  throw new Error(`Remote command failed (exit ${String(code)}): ${stderr}`);
+type DeployTaskWrapper = Parameters<ListrTask<TaskContext>["task"]>[1];
+
+/**
+ * Quotes a string so it can safely be passed as one POSIX shell argument.
+ */
+const shellQuote = (value: string): string =>
+  `'${value.replace(/'/g, `'\\''`)}'`;
+
+/** Returns a fully-qualified local Docker image reference. */
+const imageReference = (image: DeployImageConfig): string =>
+  `${image.name}:latest`;
+
+/** Returns the remote path of the single multi-image tar archive. */
+const remoteImageTar = (context: TaskContext): string =>
+  join(context.remoteHome, basename(DEPLOY_CONFIG.imageTar));
+
+/**
+ * Returns the image whose container user should own the persistent data.
+ */
+const getVolumeOwnerImage = (): VolumeOwnerImageConfig => {
+  const image: DeployImageConfig | undefined = DEPLOY_CONFIG.images.find(
+    (candidate: DeployImageConfig): boolean =>
+      candidate.containerUser !== null,
+  );
+
+  if (!image || image.containerUser === null) {
+    throw new Error(
+      "No Docker image with a container user is configured for volume ownership.",
+    );
+  }
+
+  return image as VolumeOwnerImageConfig;
 };
 
 /**
- * Builds a Docker image for the target architecture via `docker buildx`
- * and exports it as a tarball using the Dockerode API.
+ * Detects how privileged commands can be executed on the remote host.
  *
- * `buildx` is required for cross-platform compilation and is not yet
- * supported natively by the Dockerode API — hence the `execa` call for
- * the build step only.
+ * The remote machine is never reconfigured: no sudoers changes are made.
+ */
+const detectRemotePrivilege = async (
+  ssh: NodeSSH,
+  args: DeployArgs,
+  task: DeployTaskWrapper,
+): Promise<RemotePrivilege> => {
+  const uid: SSHExecCommandResponse = await ssh.execCommand("id -u");
+  if (uid.code !== 0) {
+    throw new Error(`Unable to determine remote UID: ${uid.stderr}`);
+  }
+
+  if (uid.stdout.trim() === "0") return { mode: PrivilegeMode.Root };
+
+  const hasSudo: SSHExecCommandResponse =
+    await ssh.execCommand("command -v sudo");
+  if (hasSudo.code !== 0) return { mode: PrivilegeMode.None };
+
+  const passwordless: SSHExecCommandResponse =
+    await ssh.execCommand("sudo -n true");
+  if (passwordless.code === 0) {
+    return { mode: PrivilegeMode.SudoNoPassword, pty: false };
+  }
+
+  // Some sudo configurations require a TTY even for non-interactive use.
+  const passwordlessWithPty: SSHExecCommandResponse = await ssh.execCommand(
+    "sudo -n true",
+    { execOptions: { pty: true } },
+  );
+  if (passwordlessWithPty.code === 0) {
+    return { mode: PrivilegeMode.SudoNoPassword, pty: true };
+  }
+
+  const sudoPassword: string = await task
+    .prompt(ListrInquirerPromptAdapter)
+    .run(password, {
+      message: `sudo password for ${args.user}@${args.host}`,
+      mask: true,
+    });
+
+  const validation: SSHExecCommandResponse = await ssh.execCommand(
+    "sudo -S -p '' -v",
+    { stdin: `${sudoPassword}\n` },
+  );
+  if (validation.code === 0) {
+    return {
+      mode: PrivilegeMode.SudoPassword,
+      password: sudoPassword,
+      pty: false,
+    };
+  }
+
+  // Retry with a pseudo-TTY for hosts configured with `requiretty`.
+  const validationWithPty: SSHExecCommandResponse = await ssh.execCommand(
+    "sudo -S -p '' -v",
+    {
+      stdin: `${sudoPassword}\n`,
+      execOptions: { pty: true },
+    },
+  );
+  if (validationWithPty.code === 0) {
+    return {
+      mode: PrivilegeMode.SudoPassword,
+      password: sudoPassword,
+      pty: true,
+    };
+  }
+
+  throw new Error(
+    `Unable to obtain sudo privileges: ${
+      validationWithPty.stderr || validation.stderr || "authentication failed"
+    }`,
+  );
+};
+
+interface RemoteExecutionOptions {
+  readonly elevated?: boolean;
+}
+
+/**
+ * Executes a remote SSH command and optionally elevates it to root.
+ */
+const remoteExecution = async (
+  context: TaskContext,
+  command: string,
+  options: RemoteExecutionOptions = {},
+): Promise<string> => {
+  let remoteCommand: string = command;
+  let stdin: string | undefined;
+  let pty = false;
+
+  if (options.elevated && context.privilege.mode !== PrivilegeMode.Root) {
+    if (context.privilege.mode === PrivilegeMode.None) {
+      throw new Error(
+        "Root privileges are required on the remote host, but the SSH " +
+          "user is not root and sudo is unavailable.",
+      );
+    }
+
+    const quotedCommand: string = shellQuote(command);
+
+    if (context.privilege.mode === PrivilegeMode.SudoNoPassword) {
+      remoteCommand = `sudo -n -- sh -c ${quotedCommand}`;
+      pty = context.privilege.pty;
+    } else {
+      remoteCommand = `sudo -S -p '' -- sh -c ${quotedCommand}`;
+      stdin = `${context.privilege.password}\n`;
+      pty = context.privilege.pty;
+    }
+  }
+
+  const response: SSHExecCommandResponse = await context.ssh.execCommand(
+    remoteCommand,
+    {
+      ...(stdin === undefined ? {} : { stdin }),
+      ...(pty ? { execOptions: { pty: true } } : {}),
+    },
+  );
+
+  if (response.code === 0) return response.stdout;
+
+  throw new Error(
+    `Remote command failed (exit ${String(response.code)}): ${response.stderr}`,
+  );
+};
+
+/**
+ * Builds every Docker Compose image for the target architecture and exports
+ * all expected images into one Docker tar archive.
  *
- * @param {string} arch - Target platform.
+ * @param {string} arch - Target Docker platform.
  * @returns {ListrTask[]} Build task list.
  */
 const buildTasks = (arch: string): ListrTask[] => [
   {
-    title: `Build Docker image (${arch})`,
+    title: `Build Docker images (${arch})`,
     task: async (): Promise<void> => {
       await execa(
         "docker",
-        [
-          "build",
-          `--platform=${arch}`,
-          "-t",
-          `${DEPLOY_CONFIG.imageName}:latest`,
-          ".",
-        ],
-        { stdout: "ignore", stderr: "pipe" },
+        ["compose", "-f", DEPLOY_CONFIG.composeFile, "build"],
+        {
+          env: {
+            ...process.env,
+            DOCKER_DEFAULT_PLATFORM: arch,
+          },
+          stdout: "ignore",
+          stderr: "pipe",
+        },
       );
+
+      for (const image of DEPLOY_CONFIG.images) {
+        const reference: string = imageReference(image);
+        const inspect = await execa(
+          "docker",
+          ["image", "inspect", reference],
+          {
+            reject: false,
+            stdout: "ignore",
+            stderr: "ignore",
+          },
+        );
+
+        if (inspect.exitCode !== 0) {
+          throw new Error(
+            `Expected Docker image ${reference} was not produced by ` +
+              `${DEPLOY_CONFIG.composeFile}. Ensure the corresponding Compose ` +
+              `service declares \`image: ${reference}\` and has a build section.`,
+          );
+        }
+      }
     },
   },
   {
-    title: "Export image to tarball",
+    title: "Export Docker images to archive",
     task: async (): Promise<void> => {
       mkdirSync(DEPLOY_CONFIG.outputDirectory, { recursive: true });
-      if (existsSync(DEPLOY_CONFIG.imageTar)) rmSync(DEPLOY_CONFIG.imageTar);
 
-      const docker: Dockerode = new Dockerode();
-      const image: Dockerode.Image = docker.getImage(
-        `${DEPLOY_CONFIG.imageName}:latest`,
-      );
-      const stream: NodeJS.ReadableStream = await image.get();
+      if (existsSync(DEPLOY_CONFIG.imageTar)) {
+        rmSync(DEPLOY_CONFIG.imageTar);
+      }
 
-      await new Promise<void>((resolve, reject): void => {
-        const destination: NodeJS.WritableStream = createWriteStream(
+      await execa(
+        "docker",
+        [
+          "save",
+          "-o",
           DEPLOY_CONFIG.imageTar,
-        );
-        stream.pipe(destination);
-        destination.on("finish", resolve);
-        destination.on("error", reject);
-        stream.on("error", reject);
-      });
+          ...DEPLOY_CONFIG.images.map(imageReference),
+        ],
+        { stdout: "ignore", stderr: "pipe" },
+      );
 
-      if (!existsSync(DEPLOY_CONFIG.imageTar))
-        throw new Error("Tarball not found after export.");
+      if (!existsSync(DEPLOY_CONFIG.imageTar)) {
+        throw new Error("Docker image archive was not created.");
+      }
 
       const sizeMb: string = (
         statSync(DEPLOY_CONFIG.imageTar).size /
@@ -146,8 +361,13 @@ const buildTasks = (arch: string): ListrTask[] => [
       ).toFixed(1);
 
       logger.info(
-        { imageTar: DEPLOY_CONFIG.imageTar, arch, size: `${sizeMb} MB` },
-        "Image exported.",
+        {
+          imageTar: DEPLOY_CONFIG.imageTar,
+          images: DEPLOY_CONFIG.images.map(imageReference),
+          arch,
+          size: `${sizeMb} MB`,
+        },
+        "Docker images exported.",
       );
     },
   },
@@ -163,24 +383,39 @@ const buildTasks = (arch: string): ListrTask[] => [
 const connectTasks = (args: DeployArgs): ListrTask<TaskContext>[] => [
   {
     title: "Establish SSH connection",
-    task: async (context: TaskContext): Promise<void> => {
+    task: async (
+      context: TaskContext,
+      task: DeployTaskWrapper,
+    ): Promise<void> => {
       const ssh: NodeSSH = new NodeSSH();
 
       await ssh.connect({
         host: args.host,
-        port: parseInt(args.port, 10),
+        port: Number(args.port),
         username: args.user,
         privateKeyPath: args.identityFile,
-        tryKeyboard: false,
-        readyTimeout: 10_000,
+        readyTimeout: 20000,
       });
+
       context.ssh = ssh;
-      context.remoteHome = (
-        await ssh.execCommand(["echo", "~"].join(" "))
-      ).stdout.trim();
+
+      const homeResponse: SSHExecCommandResponse =
+        await ssh.execCommand('printf %s "$HOME"');
+      if (homeResponse.code !== 0 || homeResponse.stdout.trim() === "") {
+        throw new Error(
+          `Unable to determine remote home directory: ${homeResponse.stderr}`,
+        );
+      }
+
+      context.remoteHome = homeResponse.stdout.trim();
+      context.privilege = await detectRemotePrivilege(ssh, args, task);
 
       logger.info(
-        { host: args.host, remoteHome: context.remoteHome },
+        {
+          host: args.host,
+          remoteHome: context.remoteHome,
+          privilegeMode: context.privilege.mode,
+        },
         "SSH connected.",
       );
     },
@@ -188,34 +423,31 @@ const connectTasks = (args: DeployArgs): ListrTask<TaskContext>[] => [
 ];
 
 /**
- * Returns Listr2 tasks that upload all required files to the remote host:
- * the Docker image tarball, the `.env`, and the `docker-compose.yaml`.
+ * Returns Listr2 tasks that upload the multi-image Docker archive, `.env`,
+ * and `docker-compose.yaml` to the remote host.
  *
  * @returns {ListrTask<TaskContext>[]} File upload task list.
  */
 const copyFileTasks = (): ListrTask<TaskContext>[] => [
   {
-    title: "Upload Docker image",
+    title: "Upload Docker image archive",
     task: async (context: TaskContext): Promise<void> => {
       await context.ssh.putFile(
         DEPLOY_CONFIG.imageTar,
-        `${context.remoteHome}/${DEPLOY_CONFIG.imageName}.tar`,
+        remoteImageTar(context),
       );
     },
   },
   {
     title: `Upload ${DEPLOY_CONFIG.envFile} file`,
     task: async (context: TaskContext): Promise<void> => {
-      await context.ssh.putFile(
+      const remoteEnvFile: string = join(
+        context.remoteHome,
         DEPLOY_CONFIG.envFile,
-        join(context.remoteHome, DEPLOY_CONFIG.envFile),
       );
-      await remoteExecution(
-        context.ssh,
-        ["chmod", "600", join(context.remoteHome, DEPLOY_CONFIG.envFile)].join(
-          " ",
-        ),
-      );
+
+      await context.ssh.putFile(DEPLOY_CONFIG.envFile, remoteEnvFile);
+      await remoteExecution(context, `chmod 600 ${shellQuote(remoteEnvFile)}`);
     },
   },
   {
@@ -230,9 +462,8 @@ const copyFileTasks = (): ListrTask<TaskContext>[] => [
 ];
 
 /**
- * Returns Listr2 tasks that prepare the remote host:
- * optionally install Docker and load the image tarball into the
- * remote Docker daemon.
+ * Returns Listr2 tasks that prepare the remote host, load every image from
+ * the single tar archive, and fix persistent volume permissions.
  *
  * @returns {ListrTask<TaskContext>[]} Remote setup task list.
  */
@@ -241,137 +472,141 @@ const setupRemoteTasks = (): ListrTask<TaskContext>[] => [
     title: "Ensure Docker is installed",
     task: async (context: TaskContext): Promise<void> => {
       const present: boolean = await context.ssh
-        .execCommand(["command", "-v", "docker"].join(" "))
-        .then((response: SSHExecCommandResponse): boolean => !response.code);
+        .execCommand("command -v docker")
+        .then(
+          (response: SSHExecCommandResponse): boolean => response.code === 0,
+        );
 
       if (present) return;
+
       await remoteExecution(
-        context.ssh,
-        ["curl", "-fsSL", "https://get.docker.com", "|", "sudo", "sh"].join(
-          " ",
-        ),
-      );
-      const user: string = await remoteExecution(context.ssh, "whoami");
-      await remoteExecution(
-        context.ssh,
-        ["sudo", "usermod", "-aG", "docker", `${user}`].join(" "),
+        context,
+        "curl -fsSL https://get.docker.com | sh",
+        { elevated: true },
       );
     },
   },
   {
-    title: "Load Docker image",
+    title: "Load Docker images",
     task: async (context: TaskContext): Promise<void> => {
-      await remoteExecution(
-        context.ssh,
-        [
-          "sudo",
-          "docker",
-          "load",
-          "-i",
-          join(context.remoteHome, `${DEPLOY_CONFIG.imageName}.tar`),
-        ].join(" "),
-      );
+      const archive: string = remoteImageTar(context);
+
+      await remoteExecution(context, `docker load -i ${shellQuote(archive)}`, {
+        elevated: true,
+      });
+
+      // The tarball was uploaded as the SSH user, so it can be removed without
+      // privilege escalation once all images have been loaded.
+      await remoteExecution(context, `rm -f ${shellQuote(archive)}`);
     },
   },
   {
     title: "Fix volume permissions",
     task: async (context: TaskContext): Promise<void> => {
+      const dataDirectory: string = join(context.remoteHome, "data");
+      const recordingsDirectory: string = join(dataDirectory, "recordings");
+
+      // The deployment directory belongs to the SSH user, so creating it does
+      // not require root privileges.
       await remoteExecution(
-        context.ssh,
-        [
-          "sudo",
-          "mkdir",
-          "-p",
-          join(context.remoteHome, "data"),
-          join(context.remoteHome, "data", "recordings"),
-        ].join(" "),
+        context,
+        `mkdir -p ${shellQuote(dataDirectory)} ${shellQuote(recordingsDirectory)}`,
       );
+
+      const ownerImage: VolumeOwnerImageConfig = getVolumeOwnerImage();
+      const containerUser: string = ownerImage.containerUser;
+
       const uid: string = (
         await remoteExecution(
-          context.ssh,
+          context,
           [
-            "sudo",
             "docker",
             "run",
             "--rm",
-            `${DEPLOY_CONFIG.imageName}:latest`,
+            shellQuote(imageReference(ownerImage)),
             "id",
             "-u",
-            "recorder",
+            shellQuote(containerUser),
           ].join(" "),
+          { elevated: true },
         )
       ).trim();
+
+      if (!/^\d+$/.test(uid)) {
+        throw new Error(
+          `Unable to resolve UID for container user ${containerUser} in ` +
+            `${imageReference(ownerImage)}: received ${JSON.stringify(uid)}.`,
+        );
+      }
+
       await remoteExecution(
-        context.ssh,
-        [
-          "sudo",
-          "chown",
-          "-R",
-          `${uid}:${uid}`,
-          join(context.remoteHome, "data"),
-        ].join(" "),
+        context,
+        `chown -R ${uid}:${uid} ${shellQuote(dataDirectory)}`,
+        { elevated: true },
       );
     },
   },
 ];
 
 /**
- * Returns Listr2 tasks that start the container via `docker compose`.
+ * Returns Listr2 tasks that start the containers via `docker compose`.
  *
- * Docker's own systemd service handles auto-restart on boot.
- * `restart: unless-stopped` in the compose file is sufficient —
- * no custom systemd unit file needed.
+ * Docker's own service handles auto-restart on boot.
+ * `restart: unless-stopped` in the compose file is sufficient.
  *
  * @returns {ListrTask<TaskContext>[]} Service start task list.
  */
 const runTasks = (): ListrTask<TaskContext>[] => [
   {
-    title: "Start container",
+    title: "Start containers",
     task: async (context: TaskContext): Promise<void> => {
+      const composeFile: string = join(
+        context.remoteHome,
+        DEPLOY_CONFIG.composeFile,
+      );
+
       await remoteExecution(
-        context.ssh,
+        context,
         [
-          "sudo",
           "docker",
           "compose",
           "-f",
-          join(context.remoteHome, DEPLOY_CONFIG.composeFile),
+          shellQuote(composeFile),
           "up",
           "-d",
           "--no-build",
         ].join(" "),
+        { elevated: true },
       );
     },
   },
 ];
 
 /**
- * Waits for the container to initialise then logs its status and useful
- * follow-up commands for the operator.
+ * Waits for the containers to initialize then logs their status.
  *
- * @param {NodeSSH} ssh - Active SSH connection.
- * @param {string} remoteHome - Absolute path of the remote home directory.
+ * @param {TaskContext} context - Shared deployment context.
  */
-const printStatus = async (
-  ssh: NodeSSH,
-  remoteHome: string,
-): Promise<void> => {
-  logger.info("Waiting 3s for container initialisation.");
+const printStatus = async (context: TaskContext): Promise<void> => {
+  logger.info("Waiting 3s for container initialization.");
   await new Promise<void>((resolve: () => void) => setTimeout(resolve, 3_000));
 
-  const response: SSHExecCommandResponse = await ssh.execCommand(
-    [
-      "sudo",
-      "docker",
-      "compose",
-      "-f",
-      `${remoteHome}/docker-compose.yaml`,
-      "ps",
-    ].join(" "),
+  const composeFile: string = join(
+    context.remoteHome,
+    DEPLOY_CONFIG.composeFile,
   );
 
-  logger.info({ stdout: response.stdout }, "Container status.");
-  logger.info({ image: DEPLOY_CONFIG.imageName }, "Deployment complete.");
+  const stdout: string = await remoteExecution(
+    context,
+    ["docker", "compose", "-f", shellQuote(composeFile), "ps"].join(" "),
+    { elevated: true },
+  );
+
+  logger.info({ stdout }, "Container status.");
+  logger.info(
+    { images: DEPLOY_CONFIG.images.map(imageReference) },
+    "Deployment complete.",
+  );
 };
 
 runMain(
@@ -418,33 +653,39 @@ runMain(
      *   parsed args.
      */
     run: async ({ args }: { args: DeployArgs }): Promise<void> => {
-      const context: TaskContext = { ssh: new NodeSSH(), remoteHome: "" };
+      const context: TaskContext = {
+        ssh: new NodeSSH(),
+        remoteHome: "",
+        privilege: { mode: PrivilegeMode.None },
+      };
+
+      logger.info({ args }, "Starting remote deployment.");
 
       const tasks: Listr<TaskContext> = new Listr<TaskContext>(
         [
           {
             title: `Build (${args.arch})`,
-            task: (_, task) =>
+            task: (_: TaskContext, task: DeployTaskWrapper) =>
               task.newListr(buildTasks(args.arch), { concurrent: false }),
           },
           {
             title: "Connect to remote host",
-            task: (_, task) =>
+            task: (_: TaskContext, task: DeployTaskWrapper) =>
               task.newListr(connectTasks(args), { concurrent: false }),
           },
           {
             title: "Copy files to remote host",
-            task: (_, task) =>
+            task: (_: TaskContext, task: DeployTaskWrapper) =>
               task.newListr(copyFileTasks(), { concurrent: false }),
           },
           {
             title: "Setup remote host",
-            task: (_, task) =>
+            task: (_: TaskContext, task: DeployTaskWrapper) =>
               task.newListr(setupRemoteTasks(), { concurrent: false }),
           },
           {
             title: "Run service",
-            task: (_, task) =>
+            task: (_: TaskContext, task: DeployTaskWrapper) =>
               task.newListr(runTasks(), { concurrent: false }),
           },
         ],
@@ -456,10 +697,10 @@ runMain(
 
       try {
         await tasks.run();
-        await printStatus(context.ssh, context.remoteHome);
+        await printStatus(context);
       } catch (error: unknown) {
         logger.error({ err: error }, "Deployment failed.");
-        process.exit(1);
+        process.exitCode = 1;
       } finally {
         context.ssh.dispose();
       }

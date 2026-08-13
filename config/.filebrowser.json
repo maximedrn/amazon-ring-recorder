@@ -1,0 +1,21 @@
+{
+  "port": 80,
+  "address": "0.0.0.0",
+  "baseURL": "/",
+  "log": "stdout",
+  "database": "/database/filebrowser.db",
+  "root": "/srv",
+  "defaults": {
+    "scope": "/",
+    "allowCommands": false,
+    "allowEdit": false,
+    "allowPublish": false,
+    "allowShare": false,
+    "permissions": ["read", "search", "execute", "download"]
+  },
+  "authMethod": "password",
+  "branding": {
+    "name": "Ring Recorder"
+  },
+  "commands": []
+}
