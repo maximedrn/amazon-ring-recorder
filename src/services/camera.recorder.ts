@@ -1,17 +1,14 @@
 import { type Env } from "@/config/env";
 import { OutputPattern, RecordingStatus } from "@/types";
 import { buildOutputPattern } from "@/utils/helpers";
-import ffmpegStatic from "ffmpeg-static";
-import Ffmpeg, { type FfmpegCommand } from "fluent-ffmpeg";
 import { type Logger } from "pino";
 import { PushNotificationDingV2, type RingCamera } from "ring-client-api";
-import { type StreamingSession } from "ring-client-api/streaming/streaming-session";
+import {
+  FfmpegOptions,
+  type StreamingSession,
+} from "ring-client-api/streaming/streaming-session";
 import { type Observable, type Subscription } from "rxjs";
 import { distinctUntilChanged, filter, map, skip, tap } from "rxjs/operators";
-
-// Point fluent-ffmpeg at the bundled binary.
-if (!ffmpegStatic) throw new Error("ffmpeg-static binary not found.");
-Ffmpeg.setFfmpegPath(ffmpegStatic);
 
 /**
  * Controls motion-triggered video recording for a single Ring camera.
@@ -29,12 +26,6 @@ class CameraRecorder {
 
   /** Active Ring SIP session – kept alive for the duration of a recording. */
   private streamingSession: StreamingSession | null = null;
-
-  /**
-   * Active fluent-ffmpeg command handle.
-   * `null` when {@link status} is {@link RecordingStatus.Idle}.
-   */
-  private command: FfmpegCommand | null = null;
 
   /**
    * Current lifecycle state of the recording session.
@@ -159,9 +150,9 @@ class CameraRecorder {
       // StreamVideo() establishes the SIP session and returns the RTSP URL
       // via the SipSession object. We immediately hand that URL to ffmpeg
       // and do not use ring-client-api's internal ffmpeg spawn.
-      this.streamingSession = await this.camera.streamVideo({
-        output: this.buildFfmpegArgs(outputPattern),
-      });
+      this.streamingSession = await this.camera.streamVideo(
+        this.buildFfmpegOptions(outputPattern),
+      );
 
       this.status = RecordingStatus.Active;
 
@@ -202,13 +193,11 @@ class CameraRecorder {
     this.logger.info({ reason }, "Stopping recording.");
 
     try {
-      this.command?.kill("SIGTERM");
       this.streamingSession?.stop();
       this.logger.info("Recording stopped cleanly.");
     } catch (error: unknown) {
       this.logger.error({ error }, "Error while stopping recording session.");
     } finally {
-      this.command = null;
       this.streamingSession = null;
       this.status = RecordingStatus.Idle;
     }
@@ -220,23 +209,59 @@ class CameraRecorder {
    *
    * @param {OutputPattern} outputPattern - The typed output pattern for this
    *     camera's recordings.
-   * @returns {string[]} The ffmpeg argument list for the recording session.
+   * @returns {FfmpegOptions} The ffmpeg argument list for the recording
+   *     session.
    */
-  private buildFfmpegArgs(outputPattern: string): string[] {
-    return [
-      "-flags",
-      "+global_header",
-      "-f",
-      "segment",
-      "-segment_time",
-      String(this.env.SEGMENT_SECONDS),
-      "-segment_format_options",
-      "movflags=+faststart",
-      "-reset_timestamps",
-      "1",
-      "-y",
-      outputPattern,
-    ];
+  private buildFfmpegOptions(outputPattern: string): FfmpegOptions {
+    return {
+      input: [
+        // Rebuild missing presentation timestamps and discard packets
+        // explicitly marked as corrupt.
+        "-fflags",
+        // eslint-disable-next-line no-secrets/no-secrets
+        "+genpts+discardcorrupt",
+      ],
+      video: [
+        // Do NOT use stream copy here.
+        // Decode Ring's H.264 and produce a clean H.264 stream.
+        "-c:v",
+        "libx264",
+        // Reasonable compromise for real-time recording.
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        // Maximum browser compatibility.
+        "-pix_fmt",
+        "yuv420p",
+        // Normalize Ring's irregular timestamps/frame cadence.
+        "-r",
+        "25",
+        "-fps_mode:v",
+        "cfr",
+      ],
+      audio: ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"],
+      output: [
+        "-flags",
+        "+global_header",
+        "-f",
+        "segment",
+        "-segment_time",
+        String(this.env.SEGMENT_SECONDS),
+        "-segment_format",
+        "mp4",
+        "-reset_timestamps",
+        "1",
+        // Avoid timestamps before zero in each generated MP4.
+        "-avoid_negative_ts",
+        "make_zero",
+        // Make each finished MP4 suitable for HTTP playback.
+        "-segment_format_options",
+        "movflags=+faststart",
+        "-y",
+        outputPattern,
+      ],
+    };
   }
 }
 

@@ -14,12 +14,20 @@
     "buildx",
     "citty",
     "cpus",
+    "discardcorrupt",
+    "faststart",
+    "fflags",
     "ffprobe",
+    "genpts",
+    "libx",
+    "movflags",
     "mwader",
     "nopasswd",
     "passwordless",
     "pgrep",
     "raspberrypi",
-    "requiretty"
+    "requiretty",
+    "RTSP",
+    "veryfast"
   ]
 }

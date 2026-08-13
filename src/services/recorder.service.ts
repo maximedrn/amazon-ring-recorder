@@ -2,6 +2,7 @@ import { type Env } from "@/config/env";
 import { CameraRecorder } from "@/services/camera.recorder";
 import { type TokenManager } from "@/services/token.manager";
 import { LogLevel, type RefreshToken } from "@/types";
+import ffmpegStatic from "ffmpeg-static";
 import { type Logger } from "pino";
 import { type Location, RingApi, type RingCamera } from "ring-client-api";
 
@@ -38,6 +39,10 @@ class RingRecorderService {
    */
   public async start(): Promise<void> {
     const refreshToken: RefreshToken = this.tokenManager.getToken();
+
+    if (!ffmpegStatic) {
+      throw new Error("ffmpeg-static binary not found.");
+    }
 
     this.ringApi = new RingApi({
       refreshToken,
