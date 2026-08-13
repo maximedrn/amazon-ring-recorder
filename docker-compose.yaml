@@ -41,11 +41,14 @@ services:
     container_name: filebrowser
     restart: unless-stopped
 
+    group_add:
+      - "100"
+
     ports:
       - "${FILEBROWSER_BIND:-127.0.0.1}:${FILEBROWSER_PORT:-8080}:80"
 
     volumes:
-      - ${OUTPUT_DIRECTORY:-./data/recordings}:/srv:ro
+      - ${OUTPUT_DIRECTORY:-./data/recordings}:/srv
       - filebrowser_config:/config
       - filebrowser_database:/database
 
